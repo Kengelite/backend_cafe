@@ -614,48 +614,25 @@ app.get("/api/cart/:customerId", async (req, res) => {
   }
 });
 
-app.get("/api/bill/:customerId", async (req, res) => {
-  // รับค่า Customer_Id จาก URL (เช่น /api/cart/cust-0001)
-  const customerId = req.params.customerId;
+// 1. ดึงรายการบิลทั้งหมดของลูกค้า (สถานะ 2 = สั่งซื้อแล้ว)
+app.get("/api/bills/:customerId", async (req, res) => {
+    const { customerId } = req.params;
+    const sql = `SELECT Order_Id, Order_Date, Order_NetPrice, Order_status 
+                 FROM \`Order\` WHERE Customer_Customer_Id = ? AND Order_status = '1' 
+                 ORDER BY Order_Date DESC`;
+    const [rows] = await pool.query(sql, [customerId]);
+    res.json({ success: true, bills: rows });
+});
 
-  console.log("Fetching cart for Customer_Id:", customerId);
-  if (!customerId) {
-    return res.status(400).json({ 
-      success: false, 
-      message: "ไม่พบข้อมูลรหัสลูกค้า" 
-    });
-  }
-
-  try {
-    // ใช้ SQL JOIN ที่พี่เตรียมไว้เป๊ะๆ เลยครับ
-    const sql = `
-      SELECT 
-          od.OrderDetail_Id, 
-          m.Menu_Name, 
-          od.OrderDetail_Price, 
-          od.OrderDetail_Quantity 
-      FROM \`Order\` o
-      JOIN Order_Detail od ON o.Order_Id = od.Order_Id
-      JOIN Menu m ON od.Menu_Menu_Id = m.Menu_Id
-      WHERE o.Customer_Customer_Id = ? AND o.Order_status = 1
-    `;
-
-    const [items] = await pool.query(sql, [customerId]);
-
-    // ส่งข้อมูลกลับไปให้ Android
-    // สังเกตว่าชื่อคอลัมน์จาก SQL จะตรงกับ @SerializedName ใน Kotlin พอดีเป๊ะ!
-    res.status(200).json({
-      success: true,
-      items: items // ถ้าไม่มีของในตะกร้า items จะส่งกลับไปเป็น [] (Array ว่าง)
-    });
-
-  } catch (error) {
-    console.error("Get Cart Error:", error);
-    res.status(500).json({
-      success: false,
-      message: "เกิดข้อผิดพลาดในการดึงข้อมูลตะกร้าสินค้า"
-    });
-  }
+// 2. ดึงรายละเอียดในแต่ละบิล
+app.get("/api/bill-details/:orderId", async (req, res) => {
+    const { orderId } = req.params;
+    const sql = `SELECT od.OrderDetail_Id, m.Menu_Name, od.OrderDetail_Price, od.OrderDetail_Quantity 
+                 FROM Order_Detail od 
+                 JOIN Menu m ON od.Menu_Menu_Id = m.Menu_Id 
+                 WHERE od.Order_Id = ?`;
+    const [rows] = await pool.query(sql, [orderId]);
+    res.json({ success: true, items: rows });
 });
 
 
@@ -766,6 +743,38 @@ app.get("/api/orders", async (req, res) => {
     res.status(200).json({ success: true, data: rows });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+
+
+// 1. API สำหรับอัปเดตจำนวนสินค้า (ทั้งบวกและลบ)
+app.put("/api/cart/update", async (req, res) => {
+  const { OrderDetail_Id, Quantity } = req.body;
+
+  try {
+    const sql = `UPDATE Order_Detail SET OrderDetail_Quantity = ? WHERE OrderDetail_Id = ?`;
+    await pool.query(sql, [Quantity, OrderDetail_Id]);
+    
+    res.status(200).json({ success: true, message: "อัปเดตจำนวนเรียบร้อย" });
+  } catch (error) {
+    console.error("Update Cart Error:", error);
+    res.status(500).json({ success: false, message: "อัปเดตไม่สำเร็จ" });
+  }
+});
+
+// 2. API สำหรับลบสินค้าออกจากตะกร้า
+app.delete("/api/cart/item/:id", async (req, res) => {
+  const detailId = req.params.id;
+
+  try {
+    const sql = `DELETE FROM Order_Detail WHERE OrderDetail_Id = ?`;
+    await pool.query(sql, [detailId]);
+    
+    res.status(200).json({ success: true, message: "ลบสินค้าเรียบร้อย" });
+  } catch (error) {
+    console.error("Delete Cart Item Error:", error);
+    res.status(500).json({ success: false, message: "ลบไม่สำเร็จ" });
   }
 });
 
