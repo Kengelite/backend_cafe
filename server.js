@@ -894,6 +894,37 @@ app.post("/api/orders", async (req, res) => {
   }
 });
 
+// ยืนยันการสั่งซื้อ (เปลี่ยนสถานะตะกร้า 0 -> 1 และบันทึกยอดเงิน)
+app.put("/api/orders/confirm", async (req, res) => {
+  const { agencyId, netTotal } = req.body; // ใช้ agencyId ตามโครงสร้างระบบของพี่ครับ
+
+  console.log("Confirm Order Request:", { agencyId, netTotal });
+  if (!agencyId) {
+    return res.status(400).json({ success: false, message: "ไม่พบข้อมูลผู้ใช้งาน" });
+  }
+
+  try {
+    // อัปเดตสถานะเป็น 1 และบันทึกยอด NetPrice เฉพาะออเดอร์ที่ยังเป็นตะกร้า (0)
+    const sql = `
+      UPDATE \`Order\` 
+      SET Order_status = '1', Order_NetPrice = ? 
+      WHERE Customer_Customer_Id = ? AND Order_status = '0'
+    `;
+    
+    const [result] = await pool.query(sql, [netTotal, agencyId]);
+
+    if (result.affectedRows > 0) {
+      res.status(200).json({ success: true, message: "ยืนยันการสั่งซื้อสำเร็จ" });
+    } else {
+      res.status(400).json({ success: false, message: "ไม่พบตะกร้าสินค้าที่สามารถสั่งซื้อได้" });
+    }
+  } catch (error) {
+    console.error("Confirm Order Error:", error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการยืนยันคำสั่งซื้อ" });
+  }
+});
+
+
 app.put("/api/orders/:id", async (req, res) => {
   try {
     const { Status_Status_ID } = req.body; // ตัวอย่างการอัปเดตแค่สถานะ (นำไปปรับเพิ่มฟิลด์ได้)
