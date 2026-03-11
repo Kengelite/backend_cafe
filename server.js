@@ -11,6 +11,8 @@ app.use(express.json());
 const path = require('path');
 
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+const multer = require('multer');
+
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || "localhost",
@@ -44,6 +46,238 @@ app.get("/api/cafes", async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+
+// ── 1. ตั้งค่า Multer สำหรับจัดเก็บไฟล์ ──
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, 'uploads/'); // ⚠️ ต้องแน่ใจว่าสร้างโฟลเดอร์ชื่อ 'uploads' ไว้ในโปรเจกต์แล้วนะครับ
+  },
+  filename: function (req, file, cb) {
+    // ตั้งชื่อไฟล์ใหม่ให้ไม่ซ้ำ: เวลาปัจจุบัน + สุ่มเลข + นามสกุลไฟล์เดิม
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ storage: storage });
+
+
+// 💡 หมายเหตุ: โค้ดนี้ใช้ 'upload' ที่เราตั้งค่า multer ไว้แล้วในขั้นตอนก่อนหน้านี้นะครับ
+app.post("/api/cafe/add", upload.single('image'), async (req, res) => {
+  // 1. ดึงข้อมูล Text จาก req.body (ชื่อคีย์ต้องตรงกับ @Part ใน Android)
+  const { Cafe_Name, Cafe_Location, Cafe_OpenTime, Cafe_CloseTime, Cafe_Rating } = req.body;
+  
+  // 2. ดึงข้อมูลไฟล์รูปภาพจาก req.file (multer เป็นคนจัดการให้)
+  const file = req.file; 
+
+  console.log("Add Cafe Request:", { Cafe_Name, Cafe_Location });
+  if (file) {
+      console.log("Uploaded Cafe Image:", file.filename);
+  }
+
+  // เช็คข้อมูลบังคับ
+  if (!Cafe_Name || !Cafe_Location) {
+    return res.status(400).json({ success: false, message: "กรุณากรอกชื่อและที่อยู่ร้าน" });
+  }
+
+  try {
+    // ใช้ UUID ตามมาตรฐานระบบของเรา
+    const cafeId = uuidv4(); 
+    
+    // ถ้ามีรูปอัปโหลดมา ให้เก็บแค่ "ชื่อไฟล์" ไว้ลงตาราง (ถ้าไม่มีรูปให้เป็น null)
+    const imageName = file ? file.filename : null; 
+
+    // 3. บันทึกลงตาราง Cafe 
+    // ⚠️ เช็คชื่อคอลัมน์ img ให้ตรงกับฐานข้อมูลของพี่ด้วยนะครับ
+    const sql = `
+      INSERT INTO Cafe (
+        Cafe_ID, 
+        Cafe_Name, 
+        Cafe_Location, 
+        Cafe_OpenTime, 
+        Cafe_CloseTime, 
+        Cafe_Rating, 
+        img 
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `;
+    
+    await pool.query(sql, [
+      cafeId, 
+      Cafe_Name, 
+      Cafe_Location, 
+      Cafe_OpenTime, 
+      Cafe_CloseTime, 
+      Cafe_Rating, 
+      imageName // 👈 ยัดชื่อไฟล์ เช่น '1710123456-88.jpg' ลงฐานข้อมูล
+    ]);
+
+    res.status(200).json({ 
+        success: true, 
+        message: "เพิ่มร้านค้าและอัปโหลดรูปภาพเรียบร้อยแล้ว" 
+    });
+
+  } catch (error) {
+    console.error("Add Cafe Error:", error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการสร้างร้านค้า" });
+  }
+});
+
+
+// 💡 อย่าลืมใช้ upload.single('image') เพื่อรับไฟล์เหมือนเดิมนะครับ
+app.post("/api/cafe/update", upload.single('image'), async (req, res) => {
+  // 1. รับข้อมูลจากฝั่ง Android (ชื่อต้องตรงกับ @Part)
+  const { Cafe_ID, Cafe_Name, Cafe_Location, Cafe_OpenTime, Cafe_CloseTime, Cafe_Rating } = req.body;
+  const file = req.file;
+
+  console.log("Update Cafe Request:", { Cafe_ID, Cafe_Name });
+
+  if (!Cafe_ID || !Cafe_Name || !Cafe_Location) {
+    return res.status(400).json({ success: false, message: "ข้อมูลไม่ครบถ้วน (ต้องการรหัสร้าน, ชื่อ และที่อยู่)" });
+  }
+
+  try {
+    let sql;
+    let params;
+
+    // 2. แยกเงื่อนไขการอัปเดต
+    if (file) {
+      // 🟢 กรณีที่ 1: แอดมินเลือกรูปภาพมาใหม่ (อัปเดตทุกคอลัมน์ รวมถึง img)
+      console.log("New Cafe Image Uploaded:", file.filename);
+      sql = `
+        UPDATE Cafe 
+        SET Cafe_Name = ?, 
+            Cafe_Location = ?, 
+            Cafe_OpenTime = ?, 
+            Cafe_CloseTime = ?, 
+            Cafe_Rating = ?, 
+            img = ? 
+        WHERE Cafe_ID = ?
+      `;
+      params = [Cafe_Name, Cafe_Location, Cafe_OpenTime, Cafe_CloseTime, Cafe_Rating, file.filename, Cafe_ID];
+      
+    } else {
+      // 🟡 กรณีที่ 2: แอดมินไม่ได้เปลี่ยนรูป (อัปเดตแค่ Text รูปเก่าใน DB จะยังอยู่เหมือนเดิม)
+      console.log("No new image uploaded. Updating text only.");
+      sql = `
+        UPDATE Cafe 
+        SET Cafe_Name = ?, 
+            Cafe_Location = ?, 
+            Cafe_OpenTime = ?, 
+            Cafe_CloseTime = ?, 
+            Cafe_Rating = ? 
+        WHERE Cafe_ID = ?
+      `;
+      // ไม่ต้องส่ง file.filename เข้าไปใน Array
+      params = [Cafe_Name, Cafe_Location, Cafe_OpenTime, Cafe_CloseTime, Cafe_Rating, Cafe_ID];
+    }
+
+    // 3. ยิงคำสั่ง SQL
+    const [result] = await pool.query(sql, params);
+
+    if (result.affectedRows > 0) {
+      res.status(200).json({ success: true, message: "อัปเดตข้อมูลร้านค้าเรียบร้อยแล้ว" });
+    } else {
+      res.status(404).json({ success: false, message: "ไม่พบร้านค้าที่ต้องการอัปเดต" });
+    }
+
+  } catch (error) {
+    console.error("Update Cafe Error:", error);
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการอัปเดตร้านค้า" });
+  }
+});
+
+
+
+// ── 2. เสียบ upload.single('image') เข้าไปดักจับไฟล์ตรง Route ──
+// app.post("/api/cart/add", upload.single('image'), async (req, res) => {
+//   // 💡 ข้อมูล Text ธรรมดาจะอยู่ใน req.body ส่วนไฟล์รูปจะอยู่ใน req.file ครับ
+//   const { Customer_Id, Cafe_ID, Menu_Id, Quantity, price } = req.body;
+//   const file = req.file; 
+
+//   console.log("Add to Cart Request:", { Customer_Id, Cafe_ID, Menu_Id, Quantity, price });
+//   if (file) {
+//       console.log("Uploaded Image File:", file.filename);
+//   }
+
+//   if (!Customer_Id || !Cafe_ID || !Menu_Id || !Quantity) {
+//     return res.status(400).json({ success: false, message: "ข้อมูลไม่ครบถ้วน" });
+//   }
+
+//   const connection = await pool.getConnection();
+
+//   try {
+//     await connection.beginTransaction();
+
+//     const [existingOrders] = await connection.query(
+//       `SELECT Order_Id FROM \`Order\` 
+//        WHERE Customer_Customer_Id = ? AND Cafe_Cafe_ID = ? AND Order_status = '0'`,
+//       [Customer_Id, Cafe_ID]
+//     );
+
+//     let orderId;
+
+//     if (existingOrders.length > 0) {
+//       orderId = existingOrders[0].Order_Id;
+//       console.log("Found existing order:", orderId);
+//     } else {
+//       // ใช้ uuidv4() ล้วนๆ ตามมาตรฐาน
+//       orderId = uuidv4(); 
+      
+//       const insertOrderSql = `
+//         INSERT INTO \`Order\` 
+//         (Order_Id, Order_Date, Order_TotalPrice, Order_SeviceFee, Order_Discount, Order_NetPrice, Order_status, Customer_Customer_Id, Cafe_Cafe_ID) 
+//         VALUES (?, NOW(), 0, 10.00, 0, 0, '0', ?, ?)
+//       `;
+//       await connection.query(insertOrderSql, [orderId, Customer_Id, Cafe_ID]); 
+//       console.log("Created new order:", orderId);
+//     }
+
+//     const [existingDetails] = await connection.query(
+//       `SELECT OrderDetail_Id, OrderDetail_Quantity FROM Order_Detail 
+//        WHERE Order_Id = ? AND Menu_Menu_Id = ?`,
+//       [orderId, Menu_Id]
+//     );
+
+//     if (existingDetails.length > 0) {
+//       const detailId = existingDetails[0].OrderDetail_Id;
+//       const newQuantity = Number(existingDetails[0].OrderDetail_Quantity) + Number(Quantity);
+
+//       // 💡 ถ้าในอนาคตมีคอลัมน์เก็บชื่อรูปลงฐานข้อมูล ก็เอาตัวแปร file.filename ไปอัปเดตตรงนี้ได้เลยครับ
+//       await connection.query(
+//         `UPDATE Order_Detail SET OrderDetail_Quantity = ? WHERE OrderDetail_Id = ?`,
+//         [newQuantity, detailId]
+//       );
+//       console.log("Updated existing menu quantity:", newQuantity);
+
+//     } else {
+//       const orderDetailId = uuidv4();
+      
+//       const insertDetailSql = `
+//         INSERT INTO Order_Detail (OrderDetail_Id, Order_Id, Menu_Menu_Id, OrderDetail_Quantity, OrderDetail_Price) 
+//         VALUES (?, ?, ?, ?, ?)
+//       `;
+//       await connection.query(insertDetailSql, [orderDetailId, orderId, Menu_Id, Quantity, price]);
+//       console.log("Inserted new menu to cart");
+//     }
+
+//     await connection.commit();
+//     res.status(200).json({ 
+//         success: true, 
+//         message: "บันทึกข้อมูลและอัปโหลดรูปภาพเรียบร้อยแล้ว",
+//         // ส่ง path กลับไปให้แอปเผื่อเอาไปโชว์
+//         imageUrl: file ? `/uploads/${file.filename}` : null 
+//     });
+
+//   } catch (error) {
+//     await connection.rollback();
+//     console.error("Cart/Upload Error:", error);
+//     res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการบันทึกข้อมูล" });
+//   } finally {
+//     connection.release();
+//   }
+// });
+
 
 app.post("/api/cafes", async (req, res) => {
   try {
@@ -621,12 +855,57 @@ app.get("/api/cart/:customerId", async (req, res) => {
 // 1. ดึงรายการบิลทั้งหมดของลูกค้า (สถานะ 2 = สั่งซื้อแล้ว)
 app.get("/api/bills/:customerId", async (req, res) => {
     const { customerId } = req.params;
-    const sql = `SELECT Order_Id, Order_Date, Order_NetPrice, Order_status 
-                 FROM \`Order\` WHERE Customer_Customer_Id = ? AND Order_status = '1' 
-                 ORDER BY Order_Date DESC`;
-    const [rows] = await pool.query(sql, [customerId]);
-    res.json({ success: true, bills: rows });
+    
+    const sql = `
+        SELECT 
+            o.Order_Id, 
+            o.Order_Date, 
+            o.Order_NetPrice, 
+            o.Order_status,
+            c.Cafe_Name 
+        FROM \`Order\` o
+        JOIN Cafe c ON o.Cafe_Cafe_ID = c.Cafe_ID
+        WHERE  o.Order_status = '1' 
+        ORDER BY o.Order_Date DESC
+    `;
+    
+    try {
+        const [rows] = await pool.query(sql, [customerId]);
+        res.json({ success: true, bills: rows });
+    } catch (error) {
+        console.error("Fetch Bills Error:", error);
+        res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการดึงข้อมูลบิล" });
+    }
 });
+
+
+// ดึงรายการบิลทั้งหมดของลูกค้า
+app.get("/api/bills/:agencyId", async (req, res) => {
+    const { agencyId } = req.params;
+    
+    // 👈 แก้คำสั่ง SQL ตรงนี้ ให้มี c.Cafe_Name และ JOIN ตาราง Cafe ครับ
+    const sql = `
+        SELECT 
+            o.Order_Id, 
+            o.Order_Date, 
+            o.Order_NetPrice, 
+            o.Order_status,
+            c.Cafe_Name 
+        FROM \`Order\` o
+        JOIN Cafe c ON o.Cafe_Cafe_ID = c.Cafe_ID
+        WHERE o.Agency_Agency_Id = ? AND o.Order_status != '0' 
+        ORDER BY o.updated_at DESC
+    `;
+    
+    try {
+        const [rows] = await pool.query(sql, [agencyId]);
+        res.json({ success: true, bills: rows });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false });
+    }
+});
+
 
 // 2. ดึงรายละเอียดในแต่ละบิล
 app.get("/api/bill-details/:orderId", async (req, res) => {
@@ -734,15 +1013,18 @@ app.post("/api/cart/add", async (req, res) => {
 
 app.get("/api/orders", async (req, res) => {
   try {
-    const sql = `
-            SELECT o.*, 
-                   c.Customer_Name, s.Status_Name, p.Payment_Method
-            FROM \`Order\` o
-            LEFT JOIN Customer c ON o.Customer_Customer_Id = c.Customer_Id
-            LEFT JOIN Status s ON o.Status_Status_ID = s.Status_ID
-            LEFT JOIN Payment p ON o.Payment_Payment_Id = p.Payment_Id
-            WHERE o.deleted_at IS NULL and Order_status = 1
-        `;
+  const sql = `
+ SELECT 
+    o.*,                       
+    s.Status_Name,            
+    p.Payment_Method,           
+    cf.Cafe_Name    
+FROM \`Order\` o 
+LEFT JOIN Status s ON o.Status_Status_ID = s.Status_ID    
+LEFT JOIN Payment p ON o.Payment_Payment_Id = p.Payment_Id    
+LEFT JOIN Cafe cf ON o.Cafe_Cafe_ID = cf.Cafe_ID    
+WHERE o.deleted_at IS NULL AND o.Order_status = '1';
+`;
     const [rows] = await pool.query(sql);
     res.status(200).json({ success: true, data: rows });
   } catch (error) {
@@ -895,32 +1177,107 @@ app.post("/api/orders", async (req, res) => {
 });
 
 // ยืนยันการสั่งซื้อ (เปลี่ยนสถานะตะกร้า 0 -> 1 และบันทึกยอดเงิน)
-app.put("/api/orders/confirm", async (req, res) => {
-  const { agencyId, netTotal } = req.body; // ใช้ agencyId ตามโครงสร้างระบบของพี่ครับ
+// app.put("/api/orders/confirm", async (req, res) => {
+//   const { agencyId, netTotal } = req.body; // ใช้ agencyId ตามโครงสร้างระบบของพี่ครับ
 
-  console.log("Confirm Order Request:", { agencyId, netTotal });
+//   console.log("Confirm Order Request:", { agencyId, netTotal });
+//   if (!agencyId) {
+//     return res.status(400).json({ success: false, message: "ไม่พบข้อมูลผู้ใช้งาน" });
+//   }
+
+//   try {
+//     // อัปเดตสถานะเป็น 1 และบันทึกยอด NetPrice เฉพาะออเดอร์ที่ยังเป็นตะกร้า (0)
+//     const sql = `
+//       UPDATE \`Order\` 
+//       SET Order_status = '1', Order_NetPrice = ? 
+//       WHERE Customer_Customer_Id = ? AND Order_status = '0'
+//     `;
+    
+//     const [result] = await pool.query(sql, [netTotal, agencyId]);
+
+//     if (result.affectedRows > 0) {
+//       res.status(200).json({ success: true, message: "ยืนยันการสั่งซื้อสำเร็จ" });
+//     } else {
+//       res.status(400).json({ success: false, message: "ไม่พบตะกร้าสินค้าที่สามารถสั่งซื้อได้" });
+//     }
+//   } catch (error) {
+//     console.error("Confirm Order Error:", error);
+//     res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการยืนยันคำสั่งซื้อ" });
+//   }
+// });
+
+app.put("/api/orders/confirm", async (req, res) => {
+  // 👈 เปลี่ยนตัวแปรรับค่าเป็น customerId ให้ตรงความหมาย
+  const { agencyId } = req.body; 
+
+  console.log("Confirm Order Request:", { agencyId });
   if (!agencyId) {
     return res.status(400).json({ success: false, message: "ไม่พบข้อมูลผู้ใช้งาน" });
   }
 
-  try {
-    // อัปเดตสถานะเป็น 1 และบันทึกยอด NetPrice เฉพาะออเดอร์ที่ยังเป็นตะกร้า (0)
-    const sql = `
-      UPDATE \`Order\` 
-      SET Order_status = '1', Order_NetPrice = ? 
-      WHERE Customer_Customer_Id = ? AND Order_status = '0'
-    `;
-    
-    const [result] = await pool.query(sql, [netTotal, agencyId]);
+  const connection = await pool.getConnection();
 
-    if (result.affectedRows > 0) {
-      res.status(200).json({ success: true, message: "ยืนยันการสั่งซื้อสำเร็จ" });
-    } else {
-      res.status(400).json({ success: false, message: "ไม่พบตะกร้าสินค้าที่สามารถสั่งซื้อได้" });
+  try {
+    await connection.beginTransaction();
+
+    // 1. ค้นหา Order_Id ที่เป็นตะกร้า (0) โดยใช้ Customer_Customer_Id ตามตารางเป๊ะๆ
+    const [orders] = await connection.query(
+      `SELECT Order_Id, Order_SeviceFee, Order_Discount 
+       FROM \`Order\` 
+       WHERE Customer_Customer_Id = ? AND Order_status = 0`,
+      [agencyId]
+    );
+
+    if (orders.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: "ไม่พบตะกร้าสินค้าที่สามารถสั่งซื้อได้" });
     }
+
+    const orderId = orders[0].Order_Id;
+    const serviceFee = Number(orders[0].Order_SeviceFee) || 0;
+    const discount = Number(orders[0].Order_Discount) || 0;
+
+    // 2. คำนวณยอดรวมค่าอาหารจากตาราง Order_Detail
+    const [details] = await connection.query(
+      `SELECT IFNULL(SUM(OrderDetail_Price * OrderDetail_Quantity), 0) AS subTotal 
+       FROM Order_Detail 
+       WHERE Order_Id = ?`,
+      [orderId]
+    );
+
+    const subTotal = Number(details[0].subTotal);
+    
+    if (subTotal === 0) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, message: "ไม่มีสินค้าในตะกร้า" });
+    }
+
+    // 3. คำนวณยอดสุทธิ
+    const netTotal = subTotal + serviceFee - discount;
+
+    // 4. อัปเดตตาราง Order: เปลี่ยนสถานะเป็น 1 และบันทึกยอดเงิน
+    await connection.query(
+      `UPDATE \`Order\` 
+       SET Order_status = 1, 
+           Order_TotalPrice = ?, 
+           Order_NetPrice = ? 
+       WHERE Order_Id = ?`,
+      [subTotal, netTotal, orderId]
+    );
+
+    await connection.commit();
+    res.status(200).json({ 
+        success: true, 
+        message: "ยืนยันการสั่งซื้อสำเร็จ", 
+        netTotal: netTotal 
+    });
+
   } catch (error) {
+    await connection.rollback();
     console.error("Confirm Order Error:", error);
-    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการยืนยันคำสั่งซื้อ" });
+    res.status(500).json({ success: false, message: "เกิดข้อผิดพลาดในการคำนวณและยืนยันคำสั่งซื้อ" });
+  } finally {
+    connection.release();
   }
 });
 
